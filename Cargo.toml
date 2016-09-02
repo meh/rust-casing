@@ -1,0 +1,13 @@
+[package]
+name    = "casing"
+version = "0.1.0"
+
+authors = ["meh. <meh@schizofreni.co>"]
+license = "WTFPL"
+
+description = "Performant case handling."
+repository  = "https://github.com/meh/rust-casing"
+keywords    = ["text", "string", "case", "uppercase", "lowercase", "camelcase", "header"]
+
+
+[dependencies]
