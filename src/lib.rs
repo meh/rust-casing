@@ -11,9 +11,6 @@ pub enum Camel {
 	Lower,
 }
 
-static DEFAULT_SEPARATOR_CHAR_MULTI: &'static [char] = &['-', '_'];
-static DEFAULT_SEPARATOR_U8_MULTI:   &'static [u8] = &[b'-', b'_'];
-
 /// Wrapper for a string separator.
 #[derive(Eq, PartialEq, Copy, Debug, Clone)]
 pub struct Separator<T: Copy + Eq>(pub T);
@@ -32,13 +29,17 @@ impl Default for Separator<u8> {
 
 impl<'a> Default for Separator<&'a [char]> {
 	fn default() -> Self {
-		Separator(DEFAULT_SEPARATOR_CHAR_MULTI)
+		const DEFAULT: &'static [char] = &['-', '_'];
+
+		Separator(DEFAULT)
 	}
 }
 
 impl<'a> Default for Separator<&'a [u8]> {
 	fn default() -> Self {
-		Separator(DEFAULT_SEPARATOR_U8_MULTI)
+		const DEFAULT: &'static [u8] = &[b'-', b'_'];
+
+		Separator(DEFAULT)
 	}
 }
 
