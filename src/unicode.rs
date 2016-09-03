@@ -1,14 +1,16 @@
 use std::borrow::Cow;
 use std::str::CharIndices;
-use {Casing, Locale};
+use {Casing, Locale, Separator};
 
 impl Casing for str {
+	type Character = char;
+
 	fn upper(&self, _locale: Locale) -> Cow<Self> {
 		let mut chars = self.char_indices();
 
 		while let Some((start, ch)) = chars.next() {
 			// There's a lower case character, gotta copy the string.
-			if !ch.is_uppercase() {
+			if !ch.is_uppercase() && ch.is_alphabetic() {
 				return Cow::Owned(owned(self, chars, (start, ch)));
 			}
 		}
@@ -28,7 +30,7 @@ impl Casing for str {
 			// result or extend with the upper case version if a lower case
 			// character is found.
 			for (i, ch) in chars {
-				if !ch.is_uppercase() {
+				if !ch.is_uppercase() && ch.is_alphabetic() {
 					if let Some(offset) = leftover.take() {
 						result.push_str(&this[offset .. i]);
 					}
@@ -54,7 +56,7 @@ impl Casing for str {
 
 		while let Some((start, ch)) = chars.next() {
 			// There's an upper case character, gotta copy the string.
-			if !ch.is_lowercase() {
+			if !ch.is_lowercase() && ch.is_alphabetic() {
 				return Cow::Owned(owned(self, chars, (start, ch)));
 			}
 		}
@@ -74,7 +76,7 @@ impl Casing for str {
 			// result or extend with the upper case version if a lower case
 			// character is found.
 			for (i, ch) in chars {
-				if !ch.is_lowercase() {
+				if !ch.is_lowercase() && ch.is_alphabetic() {
 					if let Some(offset) = leftover.take() {
 						result.push_str(&this[offset .. i]);
 					}
@@ -96,37 +98,74 @@ impl Casing for str {
 	}
 
 	fn capitalized(&self, _locale: Locale) -> Cow<Self> {
-		if let Some(first) = self.chars().next() {
+		let mut chars = self.char_indices();
+
+		if let Some((start, ch)) = chars.next() {
 			// If the first letter is already uppercase we don't need to do anything.
-			if !first.is_lowercase() {
-				return Cow::Borrowed(self);
+			if !ch.is_uppercase() && ch.is_alphabetic() {
+				return Cow::Owned(owned(self, chars, (start, ch), true));
 			}
 
-			return Cow::Owned(owned(self, first));
+			while let Some((start, ch)) = chars.next() {
+				// There's an upper case character, gotta copy the string.
+				if !ch.is_lowercase() && ch.is_alphabetic() {
+					return Cow::Owned(owned(self, chars, (start, ch), false));
+				}
+			}
 		}
 
 		return Cow::Borrowed(self);
 
 		#[inline(always)]
-		fn owned(this: &str, first: char) -> String {
+		fn owned(this: &str, chars: CharIndices, (start, ch): (usize, char), upcase: bool) -> String {
 			let mut result = String::with_capacity(this.len());
-			result.extend(first.to_uppercase());
+			result.push_str(&this[.. start]);
 
-			if let Some((i, _)) = this.char_indices().skip(1).next() {
-				result.push_str(&this[i..]);
+			if upcase {
+				result.extend(ch.to_uppercase());
+			}
+			else {
+				result.extend(ch.to_lowercase());
+			}
+
+			// The already lower case starting offset, if any.
+			let mut leftover = None;
+
+			// Try to collect slices of upper case characters to push into the
+			// result or extend with the upper case version if a lower case
+			// character is found.
+			for (i, ch) in chars {
+				if !ch.is_lowercase() && ch.is_alphabetic() {
+					if let Some(offset) = leftover.take() {
+						result.push_str(&this[offset .. i]);
+					}
+
+					result.extend(ch.to_lowercase());
+				}
+				else if leftover.is_none() {
+					leftover = Some(i);
+				}
+			}
+
+			// Append any leftover lower case characters.
+			if let Some(offset) = leftover.take() {
+				result.push_str(&this[offset ..]);
 			}
 
 			result
 		}
 	}
 
-	fn camel(&self, mode: super::Camel, _locale: Locale) -> Cow<Self> {
+	fn camel(&self, separator: Separator<&[char]>, mode: super::Camel, _locale: Locale) -> Cow<Self> {
 		let mut chars    = self.char_indices();
 		let mut new_word = mode == super::Camel::Upper;
 
 		while let Some((start, ch)) = chars.next() {
-			if (new_word && !ch.is_uppercase()) || (!new_word && ch.is_uppercase()) || ch == '-' || ch == '_' {
-				return Cow::Owned(owned(self, chars, (start, ch), new_word));
+			if new_word && !ch.is_uppercase() && ch.is_alphabetic() {
+				return Cow::Owned(owned(self, separator, chars, (start, ch), new_word));
+			}
+			else if separator.0.iter().any(|&c| ch == c) {
+				return Cow::Owned(owned(self, separator, chars, (start, ch), true));
 			}
 			else {
 				new_word = false;
@@ -136,11 +175,11 @@ impl Casing for str {
 		return Cow::Borrowed(self);
 
 		#[inline(always)]
-		fn owned(this: &str, chars: CharIndices, (start, ch): (usize, char), mut new_word: bool) -> String {
+		fn owned(this: &str, separator: Separator<&[char]>, chars: CharIndices, (start, ch): (usize, char), mut new_word: bool) -> String {
 			let mut result = String::with_capacity(this.len());
 			result.push_str(&this[.. start]);
 
-			if ch != '-' && ch != '_' {
+			if separator.0.iter().all(|&c| ch != c) {
 				if new_word {
 					result.extend(ch.to_uppercase());
 				}
@@ -151,10 +190,10 @@ impl Casing for str {
 
 			// The already properly cased starting offset, if any.
 			let mut leftover = None;
-			        new_word = ch == '-' || ch == '_';
+			        new_word = separator.0.iter().any(|&c| ch == c);
 
 			for (i, ch) in chars {
-				if new_word && !ch.is_uppercase() {
+				if new_word && !ch.is_uppercase() && ch.is_alphabetic() {
 					new_word = false;
 
 					if let Some(offset) = leftover.take() {
@@ -163,14 +202,7 @@ impl Casing for str {
 
 					result.extend(ch.to_uppercase());
 				}
-				else if !new_word && ch.is_uppercase() {
-					if let Some(offset) = leftover.take() {
-						result.push_str(&this[offset .. i]);
-					}
-
-					result.extend(ch.to_lowercase());
-				}
-				else if ch == '-' || ch == '_' {
+				else if separator.0.iter().any(|&c| ch == c) {
 					new_word = true;
 
 					if let Some(offset) = leftover.take() {
@@ -195,12 +227,54 @@ impl Casing for str {
 		}
 	}
 
-	fn snake(&self, _locale: Locale) -> Cow<Self> {
-		Cow::Borrowed(self)
-	}
+	fn separated(&self, separator: Separator<char>, _locale: Locale) -> Cow<Self> {
+		let mut chars = self.char_indices();
 
-	fn dashed(&self, _locale: Locale) -> Cow<Self> {
-		Cow::Borrowed(self)
+		while let Some((start, ch)) = chars.next() {
+			if ch != separator.0 && !ch.is_lowercase() {
+				return Cow::Owned(owned(self, separator, chars, (start, ch)));
+			}
+		}
+
+		return Cow::Borrowed(self);
+
+		#[inline(always)]
+		fn owned(this: &str, separator: Separator<char>, chars: CharIndices, (start, ch): (usize, char)) -> String {
+			let mut result = String::with_capacity(this.len());
+			result.push_str(&this[.. start]);
+			result.push(separator.0);
+
+			if ch.is_alphabetic() {
+				result.extend(ch.to_lowercase());
+			}
+
+			// The already lower case starting offset, if any.
+			let mut leftover = None;
+
+			for (i, ch) in chars {
+				if ch != separator.0 && !ch.is_lowercase() {
+					if let Some(offset) = leftover.take() {
+						result.push_str(&this[offset .. i]);
+					}
+
+					result.push(separator.0);
+
+					if ch.is_alphabetic() {
+						result.extend(ch.to_lowercase());
+					}
+				}
+				else if leftover.is_none() {
+					leftover = Some(i);
+				}
+			}
+
+			// Append any leftover lower case characters.
+			if let Some(offset) = leftover.take() {
+				result.push_str(&this[offset ..]);
+			}
+
+			result
+		}
 	}
 
 	fn header(&self, _locale: Locale) -> Cow<Self> {
@@ -265,76 +339,139 @@ impl Casing for str {
 #[cfg(test)]
 mod test {
 	use std::borrow::Cow;
-	use {Casing, Camel};
+	use {Casing, Camel, Separator};
 
-	#[test]
-	fn upper_borrow() {
-		assert_eq!("FOO".upper(Default::default()), Cow::Borrowed("FOO"));
+	macro_rules! assert_owned {
+		($body:expr) => (
+			assert!(match $body {
+				Cow::Borrowed(..) => false,
+				Cow::Owned(..)    => true,
+			})
+		);
+	}
+
+	macro_rules! assert_borrowed {
+		($body:expr) => (
+			assert!(match $body {
+				Cow::Borrowed(..) => true,
+				Cow::Owned(..)    => false,
+			})
+		);
 	}
 
 	#[test]
-	fn upper_owned() {
-		assert_eq!("FoO".upper(Default::default()), Cow::Owned::<str>("FOO".into()));
-		assert_eq!("fßoß".upper(Default::default()), Cow::Owned::<str>("FSSOSS".into()));
-		assert_eq!("fßoßo".upper(Default::default()), Cow::Owned::<str>("FSSOSSO".into()));
-		assert_eq!("fßoßoooooo".upper(Default::default()), Cow::Owned::<str>("FSSOSSOOOOOO".into()));
+	fn upper() {
+		assert_eq!("FOO", "FOO".upper(Default::default()));
+		assert_eq!("FOO", "FoO".upper(Default::default()));
+		assert_eq!("FSSOSS", "fßoß".upper(Default::default()));
+		assert_eq!("FSSOSSO", "fßoßo".upper(Default::default()));
+		assert_eq!("FSSOSSOOOOOO", "fßoßoooooo".upper(Default::default()));
 	}
 
 	#[test]
-	fn lower_borrow() {
-		assert_eq!("foo".lower(Default::default()), Cow::Borrowed("foo"));
-		assert_eq!("ßðđ".lower(Default::default()), Cow::Borrowed("ßðđ"));
+	fn upper_allocation() {
+		assert_borrowed!("FOO".upper(Default::default()));
+		assert_borrowed!("FOO-FOO".upper(Default::default()));
+		assert_borrowed!("FOO-ÐÐÐ".upper(Default::default()));
+		assert_borrowed!("😀😬😁😂😃😄😅😆😇😉😊🙂🙃☺️😋😌😍😘😗😙😚😜😝😛🤑🤓😎🤗😏😶😐😑😒🙄🤔😳😞😟😠😡😔😕🙁☹️😣😖😫😩😤😮😱😨😰😯😦😧😢😥😪😓😭😵😲🤐😷🤒🤕😴".upper(Default::default()));
+
+		assert_owned!("Foo".upper(Default::default()));
+		assert_owned!("FOO-Foo".upper(Default::default()));
+		assert_owned!("FOO-ßßß".upper(Default::default()));
 	}
 
 	#[test]
-	fn lower_owned() {
-		assert_eq!("FoO".lower(Default::default()), Cow::Owned::<str>("foo".into()));
-		assert_eq!("fSSoSS".lower(Default::default()), Cow::Owned::<str>("fssoss".into()));
+	fn lower() {
+		assert_eq!("foo", "foo".lower(Default::default()));
+		assert_eq!("ßðđ", "ßðđ".lower(Default::default()));
+		assert_eq!("foo", "FoO".lower(Default::default()));
+		assert_eq!("fssoss", "fSSoSS".lower(Default::default()));
 	}
 
 	#[test]
-	fn capitalized_borrow() {
-		assert_eq!("Foo".capitalized(Default::default()), Cow::Borrowed("Foo"));
-		assert_eq!("FoO".capitalized(Default::default()), Cow::Borrowed("FoO"));
+	fn lower_allocation() {
+		assert_borrowed!("foo".lower(Default::default()));
+		assert_borrowed!("foo-foo".lower(Default::default()));
+		assert_borrowed!("foo-ßßß".lower(Default::default()));
+		assert_borrowed!("😀😬😁😂😃😄😅😆😇😉😊🙂🙃☺️😋😌😍😘😗😙😚😜😝😛🤑🤓😎🤗😏😶😐😑😒🙄🤔😳😞😟😠😡😔😕🙁☹️😣😖😫😩😤😮😱😨😰😯😦😧😢😥😪😓😭😵😲🤐😷🤒🤕😴".upper(Default::default()));
+
+		assert_owned!("FOO".lower(Default::default()));
 	}
 
 	#[test]
-	fn capitalized_owned() {
-		assert_eq!("foo".capitalized(Default::default()), Cow::Owned::<str>("Foo".into()));
-		assert_eq!("foO".capitalized(Default::default()), Cow::Owned::<str>("FoO".into()));
+	fn capitalized() {
+		assert_eq!("Foo", "Foo".capitalized(Default::default()));
+		assert_eq!("Foo", "FoO".capitalized(Default::default()));
+		assert_eq!("Foo", "foo".capitalized(Default::default()));
+		assert_eq!("Foo", "foO".capitalized(Default::default()));
 	}
 
 	#[test]
-	fn camel_borrow() {
-		assert_eq!("FooBar".camel(Camel::Upper, Default::default()), Cow::Borrowed("FooBar"));
-		assert_eq!("Foo".camel(Camel::Upper, Default::default()), Cow::Borrowed("Foo"));
+	fn capitalized_allocation() {
+		assert_borrowed!("Foo".capitalized(Default::default()));
+		assert_borrowed!("Foo-foo-æßð".capitalized(Default::default()));
 
-		assert_eq!("fooBar".camel(Camel::Lower, Default::default()), Cow::Borrowed("fooBar"));
-		assert_eq!("foo".camel(Camel::Lower, Default::default()), Cow::Borrowed("foo"));
+		assert_owned!("fOOOOO".capitalized(Default::default()));
+		assert_owned!("REEEeE".capitalized(Default::default()));
 	}
 
 	#[test]
-	fn camel_owned() {
-		assert_eq!("FooBar", "Foo-bar".camel(Camel::Upper, Default::default()));
-		assert_eq!("FooBar", "foo_bar".camel(Camel::Upper, Default::default()));
+	fn camel() {
+		assert_eq!("FooBar", "FooBar".camel(Default::default(), Camel::Upper, Default::default()));
+		assert_eq!("Foo", "Foo".camel(Default::default(), Camel::Upper, Default::default()));
+		assert_eq!("FooBar", "Foo-bar".camel(Default::default(), Camel::Upper, Default::default()));
+		assert_eq!("FooBar", "foo_bar".camel(Default::default(), Camel::Upper, Default::default()));
 
-		assert_eq!("fooBar", "foo-Bar".camel(Camel::Lower, Default::default()));
-		assert_eq!("fooBar", "foo_bar".camel(Camel::Lower, Default::default()));
+		assert_eq!("fooBar", "foo-Bar".camel(Default::default(), Camel::Lower, Default::default()));
+		assert_eq!("fooBarBaz", "foo_bar-baz".camel(Default::default(), Camel::Lower, Default::default()));
+		assert_eq!("fooBar", "fooBar".camel(Default::default(), Camel::Lower, Default::default()));
+		assert_eq!("foo", "foo".camel(Default::default(), Camel::Lower, Default::default()));
 	}
 
 	#[test]
-	fn header_borrow() {
-		assert_eq!("Foo".header(Default::default()), Cow::Borrowed("Foo"));
-		assert_eq!("Foo-Bar".header(Default::default()), Cow::Borrowed("Foo-Bar"));
-		assert_eq!("Foo-Bar-Baz".header(Default::default()), Cow::Borrowed("Foo-Bar-Baz"));
-		assert_eq!("MIME-Type".header(Default::default()), Cow::Borrowed("MIME-Type"));
+	fn camel_allocation() {
+		assert_borrowed!("FooBar".camel(Default::default(), Camel::Upper, Default::default()));
+		assert_borrowed!("fooBar".camel(Default::default(), Camel::Lower, Default::default()));
 	}
 
 	#[test]
-	fn header_owned() {
-		assert_eq!("foo".header(Default::default()), Cow::Owned::<str>("Foo".into()));
-		assert_eq!("foo-bar".header(Default::default()), Cow::Owned::<str>("Foo-Bar".into()));
-		assert_eq!("foo-bar-baz".header(Default::default()), Cow::Owned::<str>("Foo-Bar-Baz".into()));
+	fn separated() {
+		assert_eq!("foo_bar", "foo_bar".separated(Separator('_'), Default::default()));
+		assert_eq!("foo-bar-baz", "foo_bar_baz".separated(Separator('-'), Default::default()));
+	}
+
+	#[test]
+	fn separated_allocation() {
+		assert_borrowed!("foo_bar".separated(Separator('_'), Default::default()));
+		assert_borrowed!("foo-bar".separated(Separator('-'), Default::default()));
+		assert_borrowed!("foo@bar".separated(Separator('@'), Default::default()));
+
+		assert_owned!("foo_bar".separated(Separator('@'), Default::default()));
+		assert_owned!("foo-bar".separated(Separator('_'), Default::default()));
+		assert_owned!("foo@bar".separated(Separator('-'), Default::default()));
+	}
+
+	#[test]
+	fn header() {
+		assert_eq!("Foo", "Foo".header(Default::default()));
+		assert_eq!("Foo-Bar", "Foo-Bar".header(Default::default()));
+		assert_eq!("Foo-Bar-Baz", "Foo-Bar-Baz".header(Default::default()));
+		assert_eq!("MIME-Type", "MIME-Type".header(Default::default()));
+		assert_eq!("Foo", "foo".header(Default::default()));
+		assert_eq!("Foo-Bar", "foo-bar".header(Default::default()));
+		assert_eq!("Foo-Bar-Baz", "foo-bar-baz".header(Default::default()));
+	}
+
+	#[test]
+	fn header_allocation() {
+		assert_borrowed!("Foo".header(Default::default()));
+		assert_borrowed!("Foo-Bar".header(Default::default()));
+		assert_borrowed!("Foo-Bar-Baz".header(Default::default()));
+		assert_borrowed!("MIME-Type".header(Default::default()));
+
+		assert_owned!("foo".header(Default::default()));
+		assert_owned!("foo-bar".header(Default::default()));
+		assert_owned!("foo-bar-baz".header(Default::default()));
 	}
 }
 

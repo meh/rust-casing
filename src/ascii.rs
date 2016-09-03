@@ -2,7 +2,7 @@ use std::borrow::Cow;
 use std::iter::{Cloned, Enumerate};
 use std::ascii::AsciiExt;
 use std::slice;
-use {Casing, Locale};
+use {Casing, Separator, Locale};
 
 #[inline(always)]
 fn is_ascii_uppercase(b: u8) -> bool {
@@ -11,16 +11,23 @@ fn is_ascii_uppercase(b: u8) -> bool {
 
 #[inline(always)]
 fn is_ascii_lowercase(b: u8) -> bool {
-	!is_ascii_uppercase(b)
+	b >= b'a' && b <= b'z'
+}
+
+#[inline(always)]
+fn is_ascii_alphabetic(b: u8) -> bool {
+	(b >= b'A' && b <= b'Z') || (b >= b'a' && b <= b'z')
 }
 
 impl Casing for [u8] {
+	type Character = u8;
+
 	fn upper(&self, _locale: Locale) -> Cow<Self> {
 		let mut chars = self.iter().cloned().enumerate();
 
 		while let Some((start, ch)) = chars.next() {
 			// There's a lower case character, gotta copy the string.
-			if !is_ascii_uppercase(ch) {
+			if !is_ascii_uppercase(ch) && is_ascii_alphabetic(ch) {
 				return Cow::Owned(owned(self, chars, (start, ch)));
 			}
 		}
@@ -40,7 +47,7 @@ impl Casing for [u8] {
 			// result or extend with the upper case version if a lower case
 			// character is found.
 			for (i, ch) in chars {
-				if !is_ascii_uppercase(ch) {
+				if !is_ascii_uppercase(ch) && is_ascii_alphabetic(ch) {
 					if let Some(offset) = leftover.take() {
 						result.extend_from_slice(&this[offset .. i]);
 					}
@@ -66,7 +73,7 @@ impl Casing for [u8] {
 
 		while let Some((start, ch)) = chars.next() {
 			// There's a lower case character, gotta copy the string.
-			if !is_ascii_lowercase(ch) {
+			if !is_ascii_lowercase(ch) && is_ascii_alphabetic(ch) {
 				return Cow::Owned(owned(self, chars, (start, ch)));
 			}
 		}
@@ -86,7 +93,7 @@ impl Casing for [u8] {
 			// result or extend with the upper case version if a lower case
 			// character is found.
 			for (i, ch) in chars {
-				if !is_ascii_lowercase(ch) {
+				if !is_ascii_lowercase(ch) && is_ascii_alphabetic(ch) {
 					if let Some(offset) = leftover.take() {
 						result.extend_from_slice(&this[offset .. i]);
 					}
@@ -108,34 +115,74 @@ impl Casing for [u8] {
 	}
 
 	fn capitalized(&self, _locale: Locale) -> Cow<Self> {
-		if let Some(&first) = self.get(0) {
+		let mut chars = self.iter().cloned().enumerate();
+
+		if let Some((start, ch)) = chars.next() {
 			// If the first letter is already uppercase we don't need to do anything.
-			if !is_ascii_lowercase(first) {
-				return Cow::Borrowed(self);
+			if !is_ascii_uppercase(ch) && is_ascii_alphabetic(ch) {
+				return Cow::Owned(owned(self, chars, (start, ch), true));
 			}
 
-			return Cow::Owned(owned(self, first));
+			while let Some((start, ch)) = chars.next() {
+				// There's an upper case character, gotta copy the string.
+				if !is_ascii_lowercase(ch) && is_ascii_alphabetic(ch) {
+					return Cow::Owned(owned(self, chars, (start, ch), false));
+				}
+			}
 		}
 
 		return Cow::Borrowed(self);
 
 		#[inline(always)]
-		fn owned(this: &[u8], first: u8) -> Vec<u8> {
+		fn owned(this: &[u8], chars: Enumerate<Cloned<slice::Iter<u8>>>, (start, ch): (usize, u8), upcase: bool) -> Vec<u8> {
 			let mut result = Vec::with_capacity(this.len());
-			result.push(first.to_ascii_uppercase());
-			result.extend_from_slice(&this[1..]);
+			result.extend_from_slice(&this[.. start]);
+
+			if upcase {
+				result.push(ch.to_ascii_uppercase());
+			}
+			else {
+				result.push(ch.to_ascii_lowercase());
+			}
+
+			// The already lower case starting offset, if any.
+			let mut leftover = None;
+
+			// Try to collect slices of upper case characters to push into the
+			// result or extend with the upper case version if a lower case
+			// character is found.
+			for (i, ch) in chars {
+				if !is_ascii_lowercase(ch) && is_ascii_alphabetic(ch) {
+					if let Some(offset) = leftover.take() {
+						result.extend_from_slice(&this[offset .. i]);
+					}
+
+					result.push(ch.to_ascii_lowercase());
+				}
+				else if leftover.is_none() {
+					leftover = Some(i);
+				}
+			}
+
+			// Append any leftover lower case characters.
+			if let Some(offset) = leftover.take() {
+				result.extend_from_slice(&this[offset ..]);
+			}
 
 			result
 		}
 	}
 
-	fn camel(&self, mode: super::Camel, _locale: Locale) -> Cow<Self> {
+	fn camel(&self, separator: Separator<&[u8]>, mode: super::Camel, _locale: Locale) -> Cow<Self> {
 		let mut chars    = self.iter().cloned().enumerate();
 		let mut new_word = mode == super::Camel::Upper;
 
 		while let Some((start, ch)) = chars.next() {
-			if (new_word && !is_ascii_uppercase(ch)) || (!new_word && is_ascii_uppercase(ch)) || ch == b'-' || ch == b'_' {
-				return Cow::Owned(owned(self, chars, (start, ch), new_word));
+			if new_word && !is_ascii_uppercase(ch) && is_ascii_alphabetic(ch) {
+				return Cow::Owned(owned(self, separator, chars, (start, ch), new_word));
+			}
+			else if separator.iter().any(|&c| ch == c) {
+				return Cow::Owned(owned(self, separator, chars, (start, ch), true));
 			}
 			else {
 				new_word = false;
@@ -145,11 +192,11 @@ impl Casing for [u8] {
 		return Cow::Borrowed(self);
 
 		#[inline(always)]
-		fn owned(this: &[u8], chars: Enumerate<Cloned<slice::Iter<u8>>>, (start, ch): (usize, u8), mut new_word: bool) -> Vec<u8> {
+		fn owned(this: &[u8], separator: Separator<&[u8]>, chars: Enumerate<Cloned<slice::Iter<u8>>>, (start, ch): (usize, u8), mut new_word: bool) -> Vec<u8> {
 			let mut result = Vec::with_capacity(this.len());
 			result.extend_from_slice(&this[.. start]);
 
-			if ch != b'-' && ch != b'_' {
+			if separator.iter().all(|&c| ch != c) {
 				if new_word {
 					result.push(ch.to_ascii_uppercase());
 				}
@@ -160,10 +207,10 @@ impl Casing for [u8] {
 
 			// The already properly cased starting offset, if any.
 			let mut leftover = None;
-			        new_word = ch == b'-' || ch == b'_';
+			        new_word = separator.iter().any(|&c| ch == c);
 
 			for (i, ch) in chars {
-				if new_word && !is_ascii_uppercase(ch) {
+				if new_word && !is_ascii_uppercase(ch) && is_ascii_alphabetic(ch) {
 					new_word = false;
 
 					if let Some(offset) = leftover.take() {
@@ -172,14 +219,7 @@ impl Casing for [u8] {
 
 					result.push(ch.to_ascii_uppercase());
 				}
-				else if !new_word && is_ascii_uppercase(ch) {
-					if let Some(offset) = leftover.take() {
-						result.extend_from_slice(&this[offset .. i]);
-					}
-
-					result.push(ch.to_ascii_lowercase());
-				}
-				else if ch == b'-' || ch == b'_' {
+				else if separator.iter().any(|&c| ch == c) {
 					new_word = true;
 
 					if let Some(offset) = leftover.take() {
@@ -204,12 +244,54 @@ impl Casing for [u8] {
 		}
 	}
 
-	fn snake(&self, _locale: Locale) -> Cow<Self> {
-		Cow::Borrowed(self)
-	}
+	fn separated(&self, separator: Separator<u8>, _locale: Locale) -> Cow<Self> {
+		let mut chars = self.iter().cloned().enumerate();
 
-	fn dashed(&self, _locale: Locale) -> Cow<Self> {
-		Cow::Borrowed(self)
+		while let Some((start, ch)) = chars.next() {
+			if ch != separator.0 && !is_ascii_lowercase(ch) {
+				return Cow::Owned(owned(self, separator, chars, (start, ch)));
+			}
+		}
+
+		return Cow::Borrowed(self);
+
+		#[inline(always)]
+		fn owned(this: &[u8], separator: Separator<u8>, chars: Enumerate<Cloned<slice::Iter<u8>>>, (start, ch): (usize, u8)) -> Vec<u8> {
+			let mut result = Vec::with_capacity(this.len());
+			result.extend_from_slice(&this[.. start]);
+			result.push(separator.0);
+
+			if is_ascii_alphabetic(ch) {
+				result.push(ch.to_ascii_lowercase());
+			}
+
+			// The already lower case starting offset, if any.
+			let mut leftover = None;
+
+			for (i, ch) in chars {
+				if ch != separator.0 && !is_ascii_lowercase(ch) {
+					if let Some(offset) = leftover.take() {
+						result.extend_from_slice(&this[offset .. i]);
+					}
+
+					result.push(separator.0);
+
+					if is_ascii_alphabetic(ch) {
+						result.push(ch.to_ascii_lowercase());
+					}
+				}
+				else if leftover.is_none() {
+					leftover = Some(i);
+				}
+			}
+
+			// Append any leftover lower case characters.
+			if let Some(offset) = leftover.take() {
+				result.extend_from_slice(&this[offset ..]);
+			}
+
+			result
+		}
 	}
 
 	fn header(&self, _locale: Locale) -> Cow<Self> {
@@ -218,41 +300,7 @@ impl Casing for [u8] {
 
 		while let Some((start, ch)) = chars.next() {
 			if new_word && !is_ascii_uppercase(ch) {
-				let mut result = Vec::with_capacity(self.len());
-				result.extend_from_slice(&self[.. start]);
-				result.push(ch.to_ascii_uppercase());
-
-				// The already properly cased starting offset, if any.
-				let mut leftover = None;
-				        new_word = false;
-
-				while let Some((i, ch)) = chars.next() {
-					if new_word && !is_ascii_uppercase(ch) {
-						new_word = false;
-
-						if let Some(offset) = leftover.take() {
-							result.extend_from_slice(&self[offset .. i]);
-						}
-
-						result.push(ch.to_ascii_uppercase());
-					}
-					else {
-						if ch == b'-' {
-							new_word = true;
-						}
-
-						if leftover.is_none() {
-							leftover = Some(i);
-						}
-					}
-				}
-
-				// Append any leftover upper case characters.
-				if let Some(offset) = leftover.take() {
-					result.extend_from_slice(&self[offset ..]);
-				}
-
-				return Cow::Owned(result);
+				return Cow::Owned(owned(self, chars, (start, ch)));
 			}
 			else if ch == b'-' {
 				new_word = true;
@@ -262,83 +310,185 @@ impl Casing for [u8] {
 			}
 		}
 
-		Cow::Borrowed(self)
+		return Cow::Borrowed(self);
+
+		#[inline(always)]
+		fn owned(this: &[u8], chars: Enumerate<Cloned<slice::Iter<u8>>>, (start, ch): (usize, u8)) -> Vec<u8> {
+			let mut result = Vec::with_capacity(this.len());
+			result.extend_from_slice(&this[.. start]);
+			result.push(ch.to_ascii_uppercase());
+
+			// The already properly cased starting offset, if any.
+			let mut leftover = None;
+			let mut new_word = false;
+
+			for (i, ch) in chars {
+				if new_word && !is_ascii_uppercase(ch) {
+					new_word = false;
+
+					if let Some(offset) = leftover.take() {
+						result.extend_from_slice(&this[offset .. i]);
+					}
+
+					result.push(ch.to_ascii_uppercase());
+				}
+				else {
+					if ch == b'-' {
+						new_word = true;
+					}
+
+					if leftover.is_none() {
+						leftover = Some(i);
+					}
+				}
+			}
+
+			// Append any leftover upper case characters.
+			if let Some(offset) = leftover.take() {
+				result.extend_from_slice(&this[offset ..]);
+			}
+
+			result
+		}
 	}
 }
 
 #[cfg(test)]
 mod test {
 	use std::borrow::Cow;
-	use {Casing, Camel};
+	use {Casing, Camel, Separator};
 
-	#[test]
-	fn upper_borrow() {
-		assert_eq!(b"FOO".upper(Default::default()), Cow::Borrowed(b"FOO"));
+	macro_rules! assert_owned {
+		($body:expr) => (
+			assert!(match $body {
+				Cow::Borrowed(..) => false,
+				Cow::Owned(..)    => true,
+			})
+		);
+	}
+
+	macro_rules! assert_borrowed {
+		($body:expr) => (
+			assert!(match $body {
+				Cow::Borrowed(..) => true,
+				Cow::Owned(..)    => false,
+			})
+		);
 	}
 
 	#[test]
-	fn upper_owned() {
-		assert_eq!(b"FoO".upper(Default::default()).into_owned(), b"FOO".to_vec());
-		assert_eq!("fßoß".as_bytes().upper(Default::default()).into_owned(), "FßOß".as_bytes().to_vec());
-		assert_eq!("fßoßo".as_bytes().upper(Default::default()).into_owned(), "FßOßO".as_bytes().to_vec());
-		assert_eq!("fßoßoooooo".as_bytes().upper(Default::default()).into_owned(), "FßOßOOOOOO".as_bytes().to_vec());
+	fn upper() {
+		assert_eq!(b"FOO".to_vec(), b"FOO".upper(Default::default()).into_owned());
+		assert_eq!(b"FOO".to_vec(), b"FoO".upper(Default::default()).into_owned());
+		assert_eq!("FßOß".as_bytes().to_vec(), "fßoß".as_bytes().upper(Default::default()).into_owned());
+		assert_eq!("FßOßO".as_bytes().to_vec(), "fßoßo".as_bytes().upper(Default::default()).into_owned());
+		assert_eq!("FßOßOOOOOO".as_bytes().to_vec(), "fßoßoooooo".as_bytes().upper(Default::default()).into_owned());
 	}
 
 	#[test]
-	fn lower_borrow() {
-		assert_eq!(b"foo".lower(Default::default()), Cow::Borrowed(b"foo"));
-		assert_eq!("ßðđ".as_bytes().lower(Default::default()), Cow::Borrowed("ßðđ".as_bytes()));
+	fn upper_allocation() {
+		assert_borrowed!(b"FOO".upper(Default::default()));
+		assert_borrowed!(b"FOO-FOO".upper(Default::default()));
+		assert_borrowed!("FOO-ÐÐÐ".as_bytes().upper(Default::default()));
+		assert_borrowed!("😀😬😁😂😃😄😅😆😇😉😊🙂🙃☺️😋😌😍😘😗😙😚😜😝😛🤑🤓😎🤗😏😶😐😑😒🙄🤔😳😞😟😠😡😔😕🙁☹️😣😖😫😩😤😮😱😨😰😯😦😧😢😥😪😓😭😵😲🤐😷🤒🤕😴".as_bytes().upper(Default::default()));
+		assert_borrowed!("FOO-ßßß".as_bytes().upper(Default::default()));
+
+		assert_owned!(b"Foo".upper(Default::default()));
+		assert_owned!(b"FOO-Foo".upper(Default::default()));
 	}
 
 	#[test]
-	fn lower_owned() {
-		assert_eq!(b"FoO".lower(Default::default()).into_owned(), b"foo".to_vec());
-		assert_eq!(b"fSSoSS".lower(Default::default()).into_owned(), b"fssoss".to_vec());
+	fn lower() {
+		assert_eq!(b"foo".to_vec(), b"foo".lower(Default::default()).into_owned());
+		assert_eq!("ßðđ".as_bytes().to_vec(), "ßðđ".as_bytes().lower(Default::default()).into_owned());
+		assert_eq!(b"foo".to_vec(), b"FoO".lower(Default::default()).into_owned());
+		assert_eq!(b"fssoss".to_vec(), b"fSSoSS".lower(Default::default()).into_owned());
 	}
 
 	#[test]
-	fn capitalized_borrow() {
+	fn lower_allocation() {
+		assert_borrowed!("foo".lower(Default::default()));
+		assert_borrowed!("foo-foo".lower(Default::default()));
+		assert_borrowed!("foo-ßßß".as_bytes().lower(Default::default()));
+		assert_borrowed!("😀😬😁😂😃😄😅😆😇😉😊🙂🙃☺️😋😌😍😘😗😙😚😜😝😛🤑🤓😎🤗😏😶😐😑😒🙄🤔😳😞😟😠😡😔😕🙁☹️😣😖😫😩😤😮😱😨😰😯😦😧😢😥😪😓😭😵😲🤐😷🤒🤕😴".as_bytes().upper(Default::default()));
+
+		assert_owned!(b"FOO".lower(Default::default()));
+	}
+
+	#[test]
+	fn capitalized() {
 		assert_eq!(b"Foo".to_vec(), b"Foo".capitalized(Default::default()).into_owned());
-		assert_eq!(b"FoO".to_vec(), b"FoO".capitalized(Default::default()).into_owned());
+		assert_eq!(b"Foo".to_vec(), b"FoO".capitalized(Default::default()).into_owned());
+		assert_eq!(b"Foo".to_vec(), b"foo".capitalized(Default::default()).into_owned());
+		assert_eq!(b"Foo".to_vec(), b"foO".capitalized(Default::default()).into_owned());
 	}
 
 	#[test]
-	fn capitalized_owned() {
-		assert_eq!(b"foo".capitalized(Default::default()).into_owned(), b"Foo".to_vec());
-		assert_eq!(b"foO".capitalized(Default::default()).into_owned(), b"FoO".to_vec());
+	fn capitalized_allocation() {
+		assert_borrowed!(b"Foo".capitalized(Default::default()));
+		assert_borrowed!("Foo-foo-æßð".as_bytes().capitalized(Default::default()));
+
+		assert_owned!(b"fOOOOO".capitalized(Default::default()));
+		assert_owned!(b"REEEeE".capitalized(Default::default()));
 	}
 
 	#[test]
-	fn camel_borrow() {
-		assert_eq!(b"FooBar".camel(Camel::Upper, Default::default()).into_owned(), b"FooBar".to_vec());
-		assert_eq!(b"Foo".camel(Camel::Upper, Default::default()).into_owned(), b"Foo".to_vec());
+	fn camel() {
+		assert_eq!(b"FooBar".to_vec(), b"FooBar".camel(Default::default(), Camel::Upper, Default::default()).into_owned());
+		assert_eq!(b"Foo".to_vec(), b"Foo".camel(Default::default(), Camel::Upper, Default::default()).into_owned());
+		assert_eq!(b"FooBar".to_vec(), b"Foo-bar".camel(Default::default(), Camel::Upper, Default::default()).into_owned());
+		assert_eq!(b"FooBar".to_vec(), b"foo_bar".camel(Default::default(), Camel::Upper, Default::default()).into_owned());
 
-		assert_eq!(b"fooBar".to_vec(), b"fooBar".camel(Camel::Lower, Default::default()).into_owned());
-		assert_eq!(b"foo".to_vec(), b"foo".camel(Camel::Lower, Default::default()).into_owned());
+		assert_eq!(b"fooBar".to_vec(), b"foo-Bar".camel(Default::default(), Camel::Lower, Default::default()).into_owned());
+		assert_eq!(b"fooBarBaz".to_vec(), b"foo_bar-baz".camel(Default::default(), Camel::Lower, Default::default()).into_owned());
+		assert_eq!(b"fooBar".to_vec(), b"fooBar".camel(Default::default(), Camel::Lower, Default::default()).into_owned());
+		assert_eq!(b"foo".to_vec(), b"foo".camel(Default::default(), Camel::Lower, Default::default()).into_owned());
 	}
 
 	#[test]
-	fn camel_owned() {
-		assert_eq!(b"FooBar".to_vec(), b"Foo-bar".camel(Camel::Upper, Default::default()).into_owned());
-		assert_eq!(b"FooBar".to_vec(), b"foo_bar".camel(Camel::Upper, Default::default()).into_owned());
-
-		assert_eq!(b"fooBar".to_vec(), b"foo-Bar".camel(Camel::Lower, Default::default()).into_owned());
-		assert_eq!(b"fooBar".to_vec(), b"foo_bar".camel(Camel::Lower, Default::default()).into_owned());
+	fn camel_allocation() {
+		assert_borrowed!(b"FooBar".camel(Default::default(), Camel::Upper, Default::default()));
+		assert_borrowed!(b"fooBar".camel(Default::default(), Camel::Lower, Default::default()));
 	}
 
 	#[test]
-	fn header_borrow() {
-		assert_eq!(b"Foo".header(Default::default()), Cow::Borrowed(b"Foo"));
-		assert_eq!(b"Foo-Bar".header(Default::default()), Cow::Borrowed(b"Foo-Bar"));
-		assert_eq!(b"Foo-Bar-Baz".header(Default::default()), Cow::Borrowed(b"Foo-Bar-Baz"));
-		assert_eq!(b"MIME-Type".header(Default::default()), Cow::Borrowed(b"MIME-Type"));
+	fn separated() {
+		assert_eq!(b"foo_bar".to_vec(), b"foo_bar".separated(Separator(b'_'), Default::default()).into_owned());
+		assert_eq!(b"foo-bar-baz".to_vec(), b"foo_bar_baz".separated(Separator(b'-'), Default::default()).into_owned());
 	}
 
 	#[test]
-	fn header_owned() {
-		assert_eq!(b"foo".header(Default::default()).into_owned(), b"Foo".to_vec());
-		assert_eq!(b"foo-bar".header(Default::default()).into_owned(), b"Foo-Bar".to_vec());
-		assert_eq!(b"foo-bar-baz".header(Default::default()).into_owned(), b"Foo-Bar-Baz".to_vec());
+	fn separated_allocation() {
+		assert_borrowed!(b"foo_bar".separated(Separator(b'_'), Default::default()));
+		assert_borrowed!(b"foo-bar".separated(Separator(b'-'), Default::default()));
+		assert_borrowed!(b"foo@bar".separated(Separator(b'@'), Default::default()));
+
+		assert_owned!(b"foo_bar".separated(Separator(b'@'), Default::default()));
+		assert_owned!(b"foo-bar".separated(Separator(b'_'), Default::default()));
+		assert_owned!(b"foo@bar".separated(Separator(b'-'), Default::default()));
+	}
+
+	#[test]
+	fn header() {
+		assert_eq!(b"Foo".to_vec(), b"Foo".header(Default::default()).into_owned());
+		assert_eq!(b"Foo-Bar".to_vec(), b"Foo-Bar".header(Default::default()).into_owned());
+		assert_eq!(b"Foo-Bar-Baz".to_vec(), b"Foo-Bar-Baz".header(Default::default()).into_owned());
+		assert_eq!(b"MIME-Type".to_vec(), b"MIME-Type".header(Default::default()).into_owned());
+		assert_eq!(b"Foo".to_vec(), b"foo".header(Default::default()).into_owned());
+		assert_eq!(b"Foo-Bar".to_vec(), b"foo-bar".header(Default::default()).into_owned());
+		assert_eq!(b"Foo-Bar-Baz".to_vec(), b"foo-bar-baz".header(Default::default()).into_owned());
+	}
+
+	#[test]
+	fn header_allocation() {
+		assert_borrowed!(b"Foo".header(Default::default()));
+		assert_borrowed!(b"Foo-Bar".header(Default::default()));
+		assert_borrowed!(b"Foo-Bar-Baz".header(Default::default()));
+		assert_borrowed!(b"MIME-Type".header(Default::default()));
+
+		assert_owned!(b"foo".header(Default::default()));
+		assert_owned!(b"foo-bar".header(Default::default()));
+		assert_owned!(b"foo-bar-baz".header(Default::default()));
 	}
 }
 
@@ -349,17 +499,17 @@ mod bench {
 
 	#[bench]
 	fn upper_owned_early(b: &mut Bencher) {
-		b.iter(|| "AAAAAaAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAa".upper(Default::default()));
+		b.iter(|| b"AAAAAaAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAa".upper(Default::default()));
 	}
 
 	#[bench]
 	fn upper_owned_late(b: &mut Bencher) {
-		b.iter(|| "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAa".upper(Default::default()));
+		b.iter(|| b"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAa".upper(Default::default()));
 	}
 
 	#[bench]
 	fn upper_owned_all(b: &mut Bencher) {
-		b.iter(|| "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".upper(Default::default()));
+		b.iter(|| b"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".upper(Default::default()));
 	}
 
 	#[bench]
@@ -369,22 +519,22 @@ mod bench {
 
 	#[bench]
 	fn upper_borrow_short(b: &mut Bencher) {
-		b.iter(|| "AAAAAAA".upper(Default::default()));
+		b.iter(|| b"AAAAAAA".upper(Default::default()));
 	}
 
 	#[bench]
 	fn upper_borrow_long(b: &mut Bencher) {
-		b.iter(|| "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA".upper(Default::default()));
+		b.iter(|| b"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA".upper(Default::default()));
 	}
 
 	#[bench]
 	fn lower_owned_early(b: &mut Bencher) {
-		b.iter(|| "aaaaaAaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaA".lower(Default::default()));
+		b.iter(|| b"aaaaaAaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaA".lower(Default::default()));
 	}
 
 	#[bench]
 	fn lower_owned_all(b: &mut Bencher) {
-		b.iter(|| "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA".lower(Default::default()));
+		b.iter(|| b"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA".lower(Default::default()));
 	}
 
 	#[bench]
@@ -394,27 +544,27 @@ mod bench {
 
 	#[bench]
 	fn lower_owned_late(b: &mut Bencher) {
-		b.iter(|| "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaA".lower(Default::default()));
+		b.iter(|| b"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaA".lower(Default::default()));
 	}
 
 	#[bench]
 	fn lower_borrow_short(b: &mut Bencher) {
-		b.iter(|| "aaaaaaa".lower(Default::default()));
+		b.iter(|| b"aaaaaaa".lower(Default::default()));
 	}
 
 	#[bench]
 	fn lower_borrow_long(b: &mut Bencher) {
-		b.iter(|| "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".lower(Default::default()));
+		b.iter(|| b"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".lower(Default::default()));
 	}
 
 	#[bench]
 	fn capitalized_owned(b: &mut Bencher) {
-		b.iter(|| "aAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA".capitalized(Default::default()));
+		b.iter(|| b"aAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA".capitalized(Default::default()));
 	}
 
 	#[bench]
 	fn capitalized_borrowed(b: &mut Bencher) {
-		b.iter(|| "Aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".capitalized(Default::default()));
+		b.iter(|| b"Aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".capitalized(Default::default()));
 	}
 
 	#[bench]
