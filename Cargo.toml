@@ -7,7 +7,4 @@ license = "WTFPL"
 
 description = "Performant case handling."
 repository  = "https://github.com/meh/rust-casing"
-keywords    = ["text", "string", "case", "uppercase", "lowercase", "camelcase", "header"]
-
-
-[dependencies]
+keywords    = ["text", "unicode", "string", "case"]
